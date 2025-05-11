@@ -45,10 +45,11 @@ export default function Signup() {
   const handleSignup = async () => {
     try {
         console.log("Signup process started");
+        console.log("Form values - Name:", name, "Email:", email);
 
-        if (!email || !password) {
-            Alert.alert("Validation Error", "Please fill in all required fields.");
-            console.log("Validation error: Missing email or password");
+        if (!email || !password || !name) {
+            Alert.alert("Validation Error", "Please fill in all required fields including your full name.");
+            console.log("Validation error: Missing required fields");
             return;
         }
 
@@ -83,28 +84,24 @@ export default function Signup() {
 
         const userId = data.user.id;
         console.log("User created with ID:", userId);
+        
+        // Just update the name field on the existing record
+        console.log("Updating user name to:", name.trim());
 
-        // Determine organisation_id based on email domain
-        const emailDomain = email.split("@")[1];
-        const organisationId = emailDomain === "candi.solar"
-            ? "3ae2290c-5d30-4b7b-897e-0871b137c16a"
-            : null;
-
-        console.log("Inserting user with:", { id: userId, email, name, organisation_id: organisationId });
-
-        // Ensure we correctly insert into "users" table
-        const { error: insertError } = await supabase
+        // Update the existing record with the name
+        const { error: updateError } = await supabase
             .from("users")
-            .insert([{ id: userId, email, name, organisation_id: organisationId }]);
+            .update({ name: name.trim() })
+            .eq('id', userId);
 
-        console.log("Raw Insert Response:", insertError);
+        console.log("Update Response:", updateError);
 
-        if (insertError) {
-            console.error("Supabase insert error:", insertError);
-            throw new Error(insertError.message);
+        if (updateError) {
+            console.error("Supabase update error:", updateError);
+            throw new Error(updateError.message);
         }
 
-        console.log("User successfully inserted into users table");
+        console.log("User name successfully updated");
 
         Alert.alert("Success", "Account created successfully! Please check your email to confirm your account.");
         router.replace("/login");
