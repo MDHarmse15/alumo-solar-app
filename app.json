@@ -15,7 +15,12 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.mckdynamics.alumo-solar-app"
+      "bundleIdentifier": "com.mckdynamics.alumo-solar-app",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Alumo Solar App needs your location to calculate accurate sunrise and sunset times for your solar power dashboard.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Alumo Solar App needs your location to calculate accurate sunrise and sunset times for your solar power dashboard.",
+        "UIBackgroundModes": ["location"]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -23,7 +28,8 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.mckdynamics.alumosolarapp"
+      "package": "com.mckdynamics.alumosolarapp",
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION"]
     },
     "web": {
       "bundler": "metro",
@@ -31,7 +37,15 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router"
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Alumo Solar App needs your location to calculate accurate sunrise and sunset times for your solar power dashboard.",
+          "locationAlwaysPermission": "Alumo Solar App needs your location to calculate accurate sunrise and sunset times for your solar power dashboard.",
+          "locationWhenInUsePermission": "Alumo Solar App needs your location to calculate accurate sunrise and sunset times for your solar power dashboard."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

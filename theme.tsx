@@ -26,7 +26,7 @@ export const THEME: { light: ThemeColors; dark: ThemeColors } = {
     backgroundColor: "#0B213E",
     textColor: "#fdfdfd",
     buttonTextColor: "#fdfdfd",
-    inputBorderColor: "#85858A",
+    inputBorderColor: "#00E798",
     inputBackgroundColor: "#00E798",
     primaryColor: "#00E798",
     placeholderTextColor: "#63768D",
