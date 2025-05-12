@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { ActivityIndicator, Image, StatusBar, View as RNView, Animated, Dimensions, StyleSheet } from 'react-native';
+import { ActivityIndicator, Image, StatusBar, View as RNView, Animated, Dimensions, StyleSheet, AppState, TouchableOpacity } from 'react-native';
 import { supabase } from '@/lib/supabaseClient';
 import { THEME, useThemeStyles } from '../../theme';
 import { View as DefaultView, Text as DefaultText } from 'react-native';
 import * as Font from "expo-font";
-import Svg, { Rect, G, Circle, Path, Text, LinearGradient, Stop, Defs } from 'react-native-svg';
+import Svg, { Rect, G, Circle, Path, Text, LinearGradient, Stop, Defs, Line } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
+import { useFocusEffect } from '@react-navigation/native';
+import Modal from 'react-native-modal';
 
 // Default location (approximate coordinates for a generic location)
 const DEFAULT_LATITUDE = 37.7749; // San Francisco, CA as fallback
@@ -53,8 +55,8 @@ const getCurrentTime = () => {
   return `${hours}:${minutes}`;
 };
 
-// Mock data for the dashboard
-const MOCK_DATA = {
+// Default data structure (will be replaced with actual data)
+const DEFAULT_DATA = {
   battery: {
     level: 60, // percentage
     isCharging: true,
@@ -77,14 +79,65 @@ const MOCK_DATA = {
   }
 };
 
+// Interface for solar data from database
+interface SolarData {
+  battery_percentage: number;
+  solar_power: number;
+  load_power: number;
+  battery_power: number;
+  timestamp: string;
+  inverter_sn: string;
+}
+
+interface PowerStats {
+  current: number;
+  max: number;
+  capacity: number;
+}
+
+// Interface for historical data
+interface HistoricalData {
+  timestamp: string;
+  value: number;
+}
+
+interface HistoricalDataSet {
+  battery: HistoricalData[];
+  solar: HistoricalData[];
+  load: HistoricalData[];
+  batteryCharging: HistoricalData[];
+}
+
 export default function TabOneScreen() {
   const [hasDevices, setHasDevices] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
-  const [dayTime, setDayTime] = useState(MOCK_DATA.dayTime);
+  const [dayTime, setDayTime] = useState(DEFAULT_DATA.dayTime);
+  const [batteryData, setBatteryData] = useState(DEFAULT_DATA.battery);
+  const [solarData, setSolarData] = useState<PowerStats>(DEFAULT_DATA.solar);
+  const [loadData, setLoadData] = useState<PowerStats>(DEFAULT_DATA.load);
+  const [deviceSerials, setDeviceSerials] = useState<string[]>([]);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [appState, setAppState] = useState(AppState.currentState);
+  
+  // Add a state to track if data loading is complete
+  const [dataLoaded, setDataLoaded] = useState(false);
+  
+  // Modal states
+  const [batteryModalVisible, setBatteryModalVisible] = useState(false);
+  const [solarModalVisible, setSolarModalVisible] = useState(false);
+  const [loadModalVisible, setLoadModalVisible] = useState(false);
+  
+  // Historical data
+  const [historicalData, setHistoricalData] = useState<HistoricalDataSet>({
+    battery: [],
+    solar: [],
+    load: [],
+    batteryCharging: []
+  });
+  
   const styles = useThemeStyles();
   const theme = THEME.dark;
-  const [blinkOpacity] = useState(new Animated.Value(0.4));
 
   // Dashboard-specific styles
   const dashboardStyles = StyleSheet.create({
@@ -171,30 +224,6 @@ export default function TabOneScreen() {
     },
   });
 
-  // Start blinking animation
-  useEffect(() => {
-    const blinkAnimation = Animated.loop(
-      Animated.sequence([
-        Animated.timing(blinkOpacity, {
-          toValue: 1,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-        Animated.timing(blinkOpacity, {
-          toValue: 0.4,
-          duration: 800,
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    
-    blinkAnimation.start();
-    
-    return () => {
-      blinkAnimation.stop();
-    };
-  }, []);
-
   const loadFonts = async () => {
     await Font.loadAsync({
     "Century-Gothic": require("../../assets/fonts/centurygothic.ttf"),
@@ -205,6 +234,237 @@ export default function TabOneScreen() {
   useEffect(() => {
       loadFonts();
   }, []);
+
+  // Function to fetch today's max values
+  const fetchDailyMaxValues = async () => {
+    try {
+      if (deviceSerials.length === 0) {
+        console.log("No device serials available for max values");
+        return;
+      }
+      
+      // Get today's date at midnight
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayISOString = today.toISOString();
+      
+      // Fetch maximum solar and load power for today
+      const { data, error } = await supabase
+        .from('solar_data')
+        .select('solar_power, load_power')
+        .in('inverter_sn', deviceSerials)
+        .gte('timestamp', todayISOString);
+        
+      if (error) {
+        console.error("Error fetching max daily values:", error);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        console.log("No data found for today");
+        return;
+      }
+      
+      // Calculate max values
+      let maxSolarPower = 0;
+      let maxLoadPower = 0;
+      
+      data.forEach(record => {
+        // Convert to kW if needed
+        const solarPower = record.solar_power / 1000;
+        const loadPower = record.load_power / 1000;
+        
+        if (solarPower > maxSolarPower) maxSolarPower = solarPower;
+        if (loadPower > maxLoadPower) maxLoadPower = loadPower;
+      });
+      
+      console.log(`Max values for today - Solar: ${maxSolarPower}kW, Load: ${maxLoadPower}kW`);
+      
+      // Update state with max values
+      setSolarData(prevData => ({
+        ...prevData,
+        max: maxSolarPower
+      }));
+      
+      setLoadData(prevData => ({
+        ...prevData,
+        max: maxLoadPower
+      }));
+      
+    } catch (error) {
+      console.error("Error in fetchDailyMaxValues:", error);
+    }
+  };
+
+  // Function to fetch historical data for the past day
+  const fetchHistoricalData = async () => {
+    try {
+      if (deviceSerials.length === 0) {
+        console.log("No device serials available for historical data");
+        return;
+      }
+      
+      // Get yesterday's date and time
+      const oneDayAgo = new Date();
+      oneDayAgo.setDate(oneDayAgo.getDate() - 1);
+      const oneDayAgoISOString = oneDayAgo.toISOString();
+      
+      console.log("Fetching historical data since:", oneDayAgoISOString);
+      
+      // Fetch data from the past day
+      const { data, error } = await supabase
+        .from('solar_data')
+        .select('timestamp, battery_percentage, solar_power, load_power, battery_power')
+        .in('inverter_sn', deviceSerials)
+        .gte('timestamp', oneDayAgoISOString)
+        .order('timestamp', { ascending: true });
+        
+      if (error) {
+        console.error("Error fetching historical data:", error);
+        return;
+      }
+      
+      if (!data || data.length === 0) {
+        console.log("No historical data found");
+        return;
+      }
+      
+      console.log(`Found ${data.length} historical data points`);
+      
+      // Process and format data for graphs
+      const batteryData: HistoricalData[] = [];
+      const solarData: HistoricalData[] = [];
+      const loadData: HistoricalData[] = [];
+      const batteryChargingData: HistoricalData[] = [];
+      
+      data.forEach(record => {
+        const timestamp = new Date(record.timestamp);
+        
+        // Format timestamp as hours:minutes
+        const timeString = `${timestamp.getHours()}:${timestamp.getMinutes().toString().padStart(2, '0')}`;
+        
+        // Battery percentage
+        batteryData.push({
+          timestamp: timeString,
+          value: record.battery_percentage
+        });
+        
+        // Solar power (convert to kW if needed)
+        solarData.push({
+          timestamp: timeString,
+          value: record.solar_power / 1000
+        });
+        
+        // Load power (convert to kW if needed)
+        loadData.push({
+          timestamp: timeString,
+          value: record.load_power / 1000
+        });
+        
+        // Battery charging/discharging (convert to kW if needed)
+        batteryChargingData.push({
+          timestamp: timeString,
+          value: record.battery_power / 1000
+        });
+      });
+      
+      // Update historical data state
+      setHistoricalData({
+        battery: batteryData,
+        solar: solarData,
+        load: loadData,
+        batteryCharging: batteryChargingData
+      });
+      
+    } catch (error) {
+      console.error("Error in fetchHistoricalData:", error);
+    }
+  };
+
+  // Fetch solar data from Supabase
+  const fetchSolarData = async () => {
+    try {
+      if (deviceSerials.length === 0) {
+        console.log("No device serials available");
+        return;
+      }
+      
+      console.log("Fetching latest solar data...");
+      
+      // Get the latest data for each device
+      const promises = deviceSerials.map(async (serial) => {
+        const { data, error } = await supabase
+          .from('solar_data')
+          .select('*')
+          .eq('inverter_sn', serial)
+          .order('timestamp', { ascending: false })
+          .limit(1);
+          
+        if (error) {
+          console.error(`Error fetching data for device ${serial}:`, error);
+          return null;
+        }
+        
+        return data && data.length > 0 ? data[0] : null;
+      });
+      
+      const results = await Promise.all(promises);
+      const validResults = results.filter(result => result !== null) as SolarData[];
+      
+      if (validResults.length === 0) {
+        console.log("No valid solar data found");
+        return;
+      }
+      
+      // Use the most recent data
+      const latestData = validResults.reduce((latest, current) => {
+        const latestDate = new Date(latest.timestamp);
+        const currentDate = new Date(current.timestamp);
+        return currentDate > latestDate ? current : latest;
+      });
+      
+      console.log("Latest solar data:", latestData);
+      
+      // Convert values to correct units if needed (assuming values are in watts and need to be in kW)
+      const solarPower = latestData.solar_power / 1000; // Convert W to kW if needed
+      const loadPower = latestData.load_power / 1000; // Convert W to kW if needed
+      const batteryPower = latestData.battery_power / 1000; // Convert W to kW if needed
+      
+      // Update battery data
+      setBatteryData({
+        level: latestData.battery_percentage,
+        isCharging: batteryPower < 0 // Negative battery power means charging
+      });
+      
+      // Update solar and load data current values (max is from daily function)
+      setSolarData(prevData => ({
+        ...prevData,
+        current: solarPower
+      }));
+      
+      setLoadData(prevData => ({
+        ...prevData,
+        current: loadPower
+      }));
+      
+      // Set last updated time
+      setLastUpdated(new Date());
+      
+      // After getting the latest data, also fetch historical data
+      await fetchHistoricalData();
+      
+      // Fetch max values for today after getting current data
+      await fetchDailyMaxValues();
+      
+      // Mark data as loaded
+      setDataLoaded(true);
+      
+    } catch (error) {
+      console.error("Error fetching solar data:", error);
+      // Still mark data as loaded even on error to allow UI to render
+      setDataLoaded(true);
+    }
+  };
 
   useEffect(() => {
     const checkUserDevices = async () => {
@@ -223,9 +483,8 @@ export default function TabOneScreen() {
         // Check if user has any devices
         const { data: devices, error: devicesError } = await supabase
           .from('devices')
-          .select('id')
-          .eq('user_id', user.id)
-          .limit(1);
+          .select('id, serial_number')
+          .eq('user_id', user.id);
         
         if (devicesError) {
           console.error("Error checking devices:", devicesError);
@@ -234,7 +493,20 @@ export default function TabOneScreen() {
         }
         
         // Set hasDevices based on whether any results were returned
-        setHasDevices(devices && devices.length > 0);
+        const hasAnyDevices = devices && devices.length > 0;
+        setHasDevices(hasAnyDevices);
+        
+        if (hasAnyDevices) {
+          // Extract device serial numbers
+          const serials = devices.map(device => device.serial_number).filter(Boolean);
+          setDeviceSerials(serials);
+          
+          // Fetch initial solar data
+          if (serials.length > 0) {
+            await fetchSolarData();
+          }
+        }
+        
         setLoading(false);
       } catch (error) {
         console.error("Unexpected error:", error);
@@ -243,7 +515,42 @@ export default function TabOneScreen() {
     };
 
     checkUserDevices();
-  }, []);
+    
+    // Set up AppState change listener for refreshing on app focus
+    const subscription = AppState.addEventListener('change', nextAppState => {
+      if (appState.match(/inactive|background/) && nextAppState === 'active') {
+        console.log('App has come to the foreground!');
+        // Refresh data when app comes to foreground
+        fetchSolarData();
+      }
+      
+      setAppState(nextAppState);
+    });
+    
+    // Update time every minute
+    const timeInterval = setInterval(() => {
+      updateCurrentTime();
+    }, 60000); // 60 seconds
+    
+    return () => {
+      subscription.remove();
+      clearInterval(timeInterval);
+    };
+  }, [appState]);
+  
+  // Use Focus Effect to refresh data when tab gains focus
+  useFocusEffect(
+    React.useCallback(() => {
+      console.log('Screen is focused, refreshing data');
+      if (hasDevices && deviceSerials.length > 0) {
+        fetchSolarData();
+      }
+      
+      return () => {
+        // Do nothing on blur
+      };
+    }, [hasDevices, deviceSerials])
+  );
 
   // Update time every minute and get location on component mount
   useEffect(() => {
@@ -334,91 +641,400 @@ export default function TabOneScreen() {
     }));
   };
 
+  // Graph Modal Component
+  const GraphModal = ({ 
+    isVisible, 
+    onClose, 
+    title, 
+    data,
+    yLabel,
+    color,
+    domain = undefined,
+    lastValue = null,
+    lastValueLabel = null,
+    lastValueUnit = null
+  }: { 
+    isVisible: boolean; 
+    onClose: () => void; 
+    title: string; 
+    data: HistoricalData[];
+    yLabel: string;
+    color: string;
+    domain?: { y: [number, number] };
+    lastValue?: number | null;
+    lastValueLabel?: string | null;
+    lastValueUnit?: string | null;
+  }) => {
+    // Skip rendering if no data is available
+    if (data.length === 0) {
+      return (
+        <Modal
+          isVisible={isVisible}
+          onBackdropPress={onClose}
+          backdropOpacity={0.8}
+          animationIn="fadeIn"
+          animationOut="fadeOut"
+          style={{ margin: 0, justifyContent: 'center', alignItems: 'center' }}
+        >
+          <DefaultView style={[modalStyles.container, { backgroundColor: styles.background.backgroundColor || '#121212' }]}>
+            <DefaultText style={modalStyles.title}>{title}</DefaultText>
+            <DefaultText style={modalStyles.noDataText}>No historical data available</DefaultText>
+            <TouchableOpacity style={modalStyles.closeButton} onPress={onClose}>
+              <Ionicons name="close-circle" size={36} color="#fff" />
+            </TouchableOpacity>
+          </DefaultView>
+        </Modal>
+      );
+    }
+    
+    // Chart dimensions
+    const chartWidth = screenWidth - 80;
+    const chartHeight = 220;
+    const paddingLeft = 50;
+    const paddingRight = 20;
+    const paddingTop = 20;
+    const paddingBottom = 40;
+    
+    // Calculate min and max for Y axis with improved logic
+    let yMin = 0; // Default to 0 for most metrics
+    let yMax = 0;
+    
+    if (domain) {
+      // Use provided domain if available
+      yMin = domain.y[0];
+      yMax = domain.y[1];
+    } else {
+      // Calculate from data
+      const values = data.map(d => d.value);
+      const dataMin = Math.min(...values);
+      const dataMax = Math.max(...values);
+      
+      // Make sure we show at least the actual min/max values, with some margin
+      yMin = Math.floor(dataMin * 0.9); // 10% below min
+      yMax = Math.ceil(dataMax * 1.1); // 10% above max
+      
+      // Force specific ranges for different graphs
+      if (title.includes("Solar Power")) {
+        // For solar, show full capacity range and ensure it's at least 10% above the max value
+        yMin = 0;
+        const maxSolar = Math.max(dataMax, solarData.max);
+        yMax = Math.max(solarData.capacity, Math.ceil(maxSolar * 1.2));
+      }
+      else if (title.includes("Load Power")) {
+        // For load, also show full capacity range
+        yMin = 0;
+        const maxLoad = Math.max(dataMax, loadData.max);
+        yMax = Math.max(loadData.capacity, Math.ceil(maxLoad * 1.2));
+      }
+      else if (title.includes("Battery Level")) {
+        // For battery, always use 0-100 range
+        yMin = 0;
+        yMax = 100;
+      }
+      
+      // Ensure we don't go below 0 for power values
+      if (yMin < 0 && yLabel === 'kW') {
+        yMin = 0;
+      }
+      
+      // Ensure reasonable range even with small differences
+      if (yMax - yMin < 1 && yLabel === 'kW') {
+        yMax = yMin + 1;
+      }
+      
+      // Ensure we always have nice round numbers
+      if (yLabel === 'kW') {
+        yMax = Math.ceil(yMax);
+      }
+    }
+    
+    // Format the last value text (if provided)
+    const formattedLastValue = lastValue !== null 
+      ? `${lastValueLabel || 'Current'}: ${lastValue.toFixed(2)} ${lastValueUnit || yLabel}`
+      : '';
+    
+    // Subsample data if there are too many points
+    let displayData = [...data];
+    if (data.length > 24) {
+      const interval = Math.floor(data.length / 24);
+      displayData = data.filter((_, index) => index % interval === 0);
+      
+      // Always include the last point
+      if (displayData[displayData.length - 1] !== data[data.length - 1]) {
+        displayData.push(data[data.length - 1]);
+      }
+    }
+    
+    // Scale data points to fit the chart
+    const dataPoints = displayData.map((point, index) => {
+      // Ensure we don't divide by zero
+      const range = Math.max(0.1, yMax - yMin);
+      const x = paddingLeft + (index / Math.max(1, displayData.length - 1)) * (chartWidth - paddingLeft - paddingRight);
+      const y = paddingTop + (chartHeight - paddingTop - paddingBottom) * (1 - (point.value - yMin) / range);
+      return { x, y, original: point };
+    });
+    
+    // Generate path data for the line
+    const pathData = dataPoints.map((point, index) => 
+      (index === 0 ? 'M' : 'L') + point.x + ',' + point.y
+    ).join(' ');
+    
+    // Generate Y-axis markers with better formatting
+    const yAxisSteps = 5;
+    const yAxisMarkers = Array.from({ length: yAxisSteps + 1 }, (_, i) => {
+      const value = yMin + (i / yAxisSteps) * (yMax - yMin);
+      const y = paddingTop + (chartHeight - paddingTop - paddingBottom) * (1 - (value - yMin) / (yMax - yMin));
+      return { y, value };
+    });
+    
+    // Generate X-axis markers with better spacing
+    const xAxisInterval = Math.max(1, Math.floor(displayData.length / 6)); // Show max 6 labels
+    const xAxisMarkers = dataPoints.filter((_, i) => i % xAxisInterval === 0 || i === dataPoints.length - 1);
+    
+    return (
+      <Modal
+        isVisible={isVisible}
+        onBackdropPress={onClose}
+        backdropOpacity={0.8}
+        animationIn="fadeIn"
+        animationOut="fadeOut"
+        style={{ margin: 0, justifyContent: 'center', alignItems: 'center' }}
+      >
+        <DefaultView style={[modalStyles.container, { backgroundColor: styles.background.backgroundColor || '#121212' }]}>
+          <DefaultText style={modalStyles.title}>{title}</DefaultText>
+          
+          <DefaultView style={[modalStyles.chartContainer, { backgroundColor: styles.background.backgroundColor || '#121212' }]}>
+            <DefaultText style={modalStyles.chartYLabel}>{yLabel}</DefaultText>
+            
+            <Svg width={chartWidth} height={chartHeight}>
+              {/* Background */}
+              <Rect
+                x={paddingLeft}
+                y={paddingTop}
+                width={chartWidth - paddingLeft - paddingRight}
+                height={chartHeight - paddingTop - paddingBottom}
+                fill="transparent"
+                stroke="#333"
+                strokeWidth="1"
+              />
+              
+              {/* Y axis */}
+              <Line
+                x1={paddingLeft}
+                y1={paddingTop}
+                x2={paddingLeft}
+                y2={chartHeight - paddingBottom}
+                stroke="#444"
+                strokeWidth="1"
+              />
+              
+              {/* X axis */}
+              <Line
+                x1={paddingLeft}
+                y1={chartHeight - paddingBottom}
+                x2={chartWidth - paddingRight}
+                y2={chartHeight - paddingBottom}
+                stroke="#444"
+                strokeWidth="1"
+              />
+              
+              {/* Y axis grid lines and labels */}
+              {yAxisMarkers.map((marker, i) => (
+                <React.Fragment key={`y-marker-${i}`}>
+                  <Line
+                    x1={paddingLeft - 5}
+                    y1={marker.y}
+                    x2={chartWidth - paddingRight}
+                    y2={marker.y}
+                    stroke="#444"
+                    strokeWidth="1"
+                    strokeDasharray={i === 0 ? "0" : "3,3"}
+                    opacity={i === 0 ? 1 : 0.5}
+                  />
+                  <Text
+                    x={paddingLeft - 10}
+                    y={marker.y + 5}
+                    textAnchor="end"
+                    fill="#ccc"
+                    fontSize="10"
+                  >
+                    {yLabel === '%' ? marker.value.toFixed(0) : marker.value.toFixed(1)}
+                  </Text>
+                </React.Fragment>
+              ))}
+              
+              {/* X axis labels */}
+              {xAxisMarkers.map((point, i) => (
+                <Text
+                  key={`x-label-${i}`}
+                  x={point.x}
+                  y={chartHeight - paddingBottom + 15}
+                  textAnchor="middle"
+                  fill="#ccc"
+                  fontSize="10"
+                >
+                  {point.original.timestamp}
+                </Text>
+              ))}
+              
+              {/* Data line */}
+              <Path
+                d={pathData}
+                stroke={color}
+                strokeWidth="3"
+                fill="none"
+              />
+              
+              {/* Data points */}
+              {dataPoints.map((point, i) => (
+                <Circle
+                  key={`point-${i}`}
+                  cx={point.x}
+                  cy={point.y}
+                  r="4"
+                  fill={color}
+                />
+              ))}
+            </Svg>
+          </DefaultView>
+          
+          {/* Display last value if provided */}
+          {lastValue !== null && (
+            <DefaultText style={modalStyles.lastValueText}>
+              {formattedLastValue}
+            </DefaultText>
+          )}
+          
+          <TouchableOpacity style={modalStyles.closeButton} onPress={onClose}>
+            <Ionicons name="close-circle" size={36} color="#fff" />
+          </TouchableOpacity>
+        </DefaultView>
+      </Modal>
+    );
+  };
+
   // Battery indicator component
   const BatteryIndicator = () => {
-    const { level, isCharging } = MOCK_DATA.battery;
+    const { level, isCharging } = batteryData;
+    
+    // Create animation values local to this component
+    const [blinkOpacity] = useState(() => new Animated.Value(0.4));
+    
+    // Create and start the animation when the component mounts or charging state changes
+    // But only after data is loaded
+    useEffect(() => {
+      // Don't start animation until data is fully loaded
+      if (!dataLoaded) {
+        return;
+      }
+      
+      console.log("Setting up battery animation, charging:", isCharging);
+      
+      // Create a blinking animation with a pause at full brightness
+      const blinkAnimation = Animated.loop(
+        Animated.sequence([
+          // Fade in to full brightness
+          Animated.timing(blinkOpacity, {
+            toValue: 1,
+            duration: 700,
+            useNativeDriver: true,
+          }),
+          // Hold at full brightness
+          Animated.delay(300),
+          // Fade out to dim
+          Animated.timing(blinkOpacity, {
+            toValue: 0.3,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          // Pause briefly at dim before starting again
+          Animated.delay(200),
+        ])
+      );
+      
+      // Start the animation
+      blinkAnimation.start();
+      
+      // Clean up animation when component unmounts or charging state changes
+      return () => {
+        console.log("Stopping battery animation");
+        blinkAnimation.stop();
+      };
+    }, [isCharging, blinkOpacity, dataLoaded]); // Add dataLoaded dependency
+    
     const batteryWidth = 150;
     const batteryHeight = 75;
     const capWidth = 10;
     const flashColor = isCharging ? theme.primaryColor : theme.dangerColor;
     
     // Calculate the position for the flashing section based on charging state
-    const flashSectionStyle = {
-      position: 'absolute' as const,
-      top: 4,
-      left: 4 + ((batteryWidth - 8) * (level / 100)), // Position after the filled section
-      width: (batteryWidth - 8) * 0.10, // 10% of battery width
-      height: batteryHeight - 8,
-      borderTopRightRadius: 6,
-      borderBottomRightRadius: 6,
-    };
+    const flashPosition = Math.min(
+      4 + ((batteryWidth - 8) * (level / 100)), 
+      batteryWidth - ((batteryWidth - 8) * 0.12) - 4
+    );
     
     return (
-      <DefaultView style={dashboardStyles.dashboardCard}>
+      <TouchableOpacity 
+        style={dashboardStyles.dashboardCard}
+        onPress={() => setBatteryModalVisible(true)}
+        activeOpacity={0.7}
+      >
         <DefaultText style={[dashboardStyles.cardTitle, { color: theme.textColor }]}>Battery Status</DefaultText>
         
         <DefaultView style={dashboardStyles.batteryContainer}>
-          <Svg width={batteryWidth + capWidth} height={batteryHeight}>
-            {/* Battery outline */}
-            <Rect
-              x="0"
-              y="0"
-              width={batteryWidth}
-              height={batteryHeight}
-              rx="8"
-              ry="8"
-              fill="transparent"
-              stroke={theme.textColor}
-              strokeWidth="4"
-            />
+          <DefaultView style={{ width: batteryWidth + capWidth, height: batteryHeight, position: 'relative' }}>
+            <Svg width={batteryWidth + capWidth} height={batteryHeight}>
+              {/* Battery outline */}
+              <Rect
+                x="0"
+                y="0"
+                width={batteryWidth}
+                height={batteryHeight}
+                rx="8"
+                ry="8"
+                fill="transparent"
+                stroke={theme.textColor}
+                strokeWidth="4"
+              />
+              
+              {/* Battery cap */}
+              <Rect
+                x={batteryWidth}
+                y={(batteryHeight / 2) - 15}
+                width={capWidth}
+                height={30}
+                rx="3"
+                ry="3"
+                fill={theme.textColor}
+              />
+              
+              {/* Battery fill */}
+              <Rect
+                x="4"
+                y="4"
+                width={(batteryWidth - 8) * (level / 100)}
+                height={batteryHeight - 8}
+                rx="6"
+                ry="6"
+                fill={theme.primaryColor}
+                opacity="0.8"
+              />
+            </Svg>
             
-            {/* Battery cap */}
-            <Rect
-              x={batteryWidth}
-              y={(batteryHeight / 2) - 15}
-              width={capWidth}
-              height={30}
-              rx="3"
-              ry="3"
-              fill={theme.textColor}
-            />
-            
-            {/* Battery fill */}
-            <Rect
-              x="4"
-              y="4"
-              width={(batteryWidth - 8) * (level / 100)}
-              height={batteryHeight - 8}
-              rx="6"
-              ry="6"
-              fill={theme.primaryColor}
-              opacity="0.8"
-            />
-            
-            {/* Flashing section - always show */}
-            <RNView style={{
-              position: 'absolute' as const,
-              top: 4,
-              left: Math.min(4 + ((batteryWidth - 8) * (level / 100)), batteryWidth - ((batteryWidth - 8) * 0.10) - 4), // Position after fill or at end of battery
-              width: (batteryWidth - 8) * 0.10, // 10% of battery width
-              height: batteryHeight - 8,
-              borderTopRightRadius: 6,
-              borderBottomRightRadius: 6,
-              borderTopLeftRadius: 6,
-              borderBottomLeftRadius: 6,
-            }}>
-              <Animated.View style={{
+            {/* Flashing section separated from SVG */}
+            <Animated.View 
+              style={{
+                position: 'absolute',
+                top: 4,
+                left: flashPosition,
+                width: (batteryWidth - 8) * 0.12,
+                height: batteryHeight - 8,
                 backgroundColor: flashColor,
                 opacity: blinkOpacity,
-                width: '100%',
-                height: '100%',
-                borderTopRightRadius: 6,
-                borderBottomRightRadius: 6,
-                borderTopLeftRadius: 6,
-                borderBottomLeftRadius: 6,
-              }} />
-            </RNView>
-          </Svg>
+                borderRadius: 6,
+              }} 
+            />
+          </DefaultView>
           
           {/* Battery percentage text below battery */}
           <DefaultText style={[dashboardStyles.batteryPercentage, { color: theme.textColor }]}>
@@ -436,7 +1052,7 @@ export default function TabOneScreen() {
             </DefaultText>
           </DefaultView>
         </DefaultView>
-      </DefaultView>
+      </TouchableOpacity>
     );
   };
 
@@ -620,7 +1236,8 @@ export default function TabOneScreen() {
     capacity,
     color,
     style,
-    gradientColors = ["#00E798", undefined]
+    gradientColors = ["#00E798", undefined],
+    onPress
   }: { 
     title: string; 
     current: number; 
@@ -629,6 +1246,7 @@ export default function TabOneScreen() {
     color: string;
     style?: any;
     gradientColors?: [string, string?];
+    onPress?: () => void;
   }) => {
     const size = 150;
     const strokeWidth = 15;
@@ -645,7 +1263,11 @@ export default function TabOneScreen() {
     ];
     
     return (
-      <DefaultView style={[dashboardStyles.dashboardCard, style]}>
+      <TouchableOpacity 
+        style={[dashboardStyles.dashboardCard, style]}
+        onPress={onPress}
+        activeOpacity={0.7}
+      >
         <DefaultText style={dashboardStyles.cardTitle}>{title}</DefaultText>
         
         <DefaultView style={dashboardStyles.dialContainer}>
@@ -711,7 +1333,7 @@ export default function TabOneScreen() {
             </DefaultText>
           </DefaultView>
         </DefaultView>
-      </DefaultView>
+      </TouchableOpacity>
     );
   };
 
@@ -777,23 +1399,61 @@ export default function TabOneScreen() {
         <DefaultView style={dashboardStyles.powerMetricsRow}>
           <PowerDial 
             title="Solar Power" 
-            current={MOCK_DATA.solar.current} 
-            max={MOCK_DATA.solar.max} 
-            capacity={MOCK_DATA.solar.capacity}
+            current={solarData.current} 
+            max={solarData.max} 
+            capacity={solarData.capacity}
             color={theme.primaryColor}
             style={{ flex: 1, marginRight: 5 }}
+            onPress={() => setSolarModalVisible(true)}
           />
           
           <PowerDial 
             title="Load Power" 
-            current={MOCK_DATA.load.current} 
-            max={MOCK_DATA.load.max} 
-            capacity={MOCK_DATA.load.capacity}
+            current={loadData.current} 
+            max={loadData.max} 
+            capacity={loadData.capacity}
             color={theme.dangerColor}
             style={{ flex: 1, marginLeft: 5 }}
             gradientColors={["#FF5252", "#00E798"]}
+            onPress={() => setLoadModalVisible(true)}
           />
         </DefaultView>
+        
+        {/* Modals */}
+        <GraphModal
+          isVisible={batteryModalVisible}
+          onClose={() => setBatteryModalVisible(false)}
+          title="Battery Level (24h)"
+          data={historicalData.battery}
+          yLabel="%"
+          color={theme.primaryColor}
+          domain={{ y: [0, 100] }}
+          lastValue={batteryData.isCharging ? -1 * historicalData.batteryCharging[historicalData.batteryCharging.length - 1]?.value || 0 : historicalData.batteryCharging[historicalData.batteryCharging.length - 1]?.value || 0}
+          lastValueLabel="Current Battery Power"
+          lastValueUnit="kW"
+        />
+        
+        <GraphModal
+          isVisible={solarModalVisible}
+          onClose={() => setSolarModalVisible(false)}
+          title="Solar Power (24h)"
+          data={historicalData.solar}
+          yLabel="kW"
+          color="#FFA500"
+          lastValue={solarData.current}
+          lastValueLabel="Current Solar Power"
+        />
+        
+        <GraphModal
+          isVisible={loadModalVisible}
+          onClose={() => setLoadModalVisible(false)}
+          title="Load Power (24h)"
+          data={historicalData.load}
+          yLabel="kW"
+          color={theme.dangerColor}
+          lastValue={loadData.current}
+          lastValueLabel="Current Load Power"
+        />
       </DefaultView>
     </DefaultView>
   );
@@ -801,3 +1461,54 @@ export default function TabOneScreen() {
 
 // Dashboard-specific styles
 const screenWidth = Dimensions.get('window').width;
+
+// Dashboard-specific styles - add this at the bottom
+const modalStyles = StyleSheet.create({
+  container: {
+    // Use a darker background matching the app background
+    // backgroundColor set dynamically from styles.background.backgroundColor
+    width: screenWidth - 40,
+    borderRadius: 12,
+    padding: 20,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#444'
+  },
+  title: {
+    fontSize: 20,
+    fontFamily: 'Century-Gothic-Bold',
+    color: '#fff',
+    marginBottom: 20
+  },
+  chartContainer: {
+    // backgroundColor set dynamically to match the main background
+    borderRadius: 8, 
+    padding: 20,
+    marginBottom: 15,
+    borderWidth: 1,
+    borderColor: '#333'
+  },
+  chartYLabel: {
+    color: '#ccc',
+    fontSize: 12,
+    position: 'absolute',
+    left: 5,
+    top: '50%',
+    transform: [{ rotate: '-90deg' }]
+  },
+  lastValueText: {
+    color: '#fff',
+    fontSize: 16,
+    fontFamily: 'Century-Gothic',
+    marginBottom: 15
+  },
+  closeButton: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+  },
+  noDataText: {
+    color: '#ccc',
+    marginBottom: 20
+  }
+});
