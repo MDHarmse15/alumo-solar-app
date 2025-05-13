@@ -14,6 +14,10 @@ import Modal from 'react-native-modal';
 const DEFAULT_LATITUDE = 37.7749; // San Francisco, CA as fallback
 const DEFAULT_LONGITUDE = -122.4194;
 
+// Default max power values
+const DEFAULT_MAX_SOLAR_POWER = 5.0;
+const DEFAULT_MAX_INVERTER_POWER = 6.0;
+
 // Function to estimate sunrise and sunset times based on latitude, day of year, and time zone
 const estimateSunriseSunset = (latitude: number, date: Date) => {
   // Day of year (1-366)
@@ -108,10 +112,19 @@ interface HistoricalDataSet {
   batteryCharging: HistoricalData[];
 }
 
+// Interface for user settings
+interface UserSettings {
+  latitude?: number;
+  longitude?: number;
+  max_solar_power?: number;
+  max_inverter_power?: number;
+}
+
 export default function TabOneScreen() {
   const [hasDevices, setHasDevices] = useState<boolean | null>(null);
   const [loading, setLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
+  const [userSettings, setUserSettings] = useState<UserSettings>({});
   const [dayTime, setDayTime] = useState(DEFAULT_DATA.dayTime);
   const [batteryData, setBatteryData] = useState(DEFAULT_DATA.battery);
   const [solarData, setSolarData] = useState<PowerStats>(DEFAULT_DATA.solar);
@@ -270,7 +283,7 @@ export default function TabOneScreen() {
       let maxLoadPower = 0;
       
       data.forEach(record => {
-        // Convert to kW if needed
+        // Convert to kW 
         const solarPower = record.solar_power / 1000;
         const loadPower = record.load_power / 1000;
         
@@ -349,22 +362,27 @@ export default function TabOneScreen() {
           value: record.battery_percentage
         });
         
-        // Solar power (convert to kW if needed)
+        // Convert power values from watts to kilowatts
+        const solarPowerKW = record.solar_power / 1000;
+        const loadPowerKW = record.load_power / 1000;
+        const batteryPowerKW = record.battery_power / 1000;
+        
+        // Solar power (in kW)
         solarData.push({
           timestamp: timeString,
-          value: record.solar_power / 1000
+          value: solarPowerKW
         });
         
-        // Load power (convert to kW if needed)
+        // Load power (in kW)
         loadData.push({
           timestamp: timeString,
-          value: record.load_power / 1000
+          value: loadPowerKW
         });
         
-        // Battery charging/discharging (convert to kW if needed)
+        // Battery charging/discharging (in kW)
         batteryChargingData.push({
           timestamp: timeString,
-          value: record.battery_power / 1000
+          value: batteryPowerKW
         });
       });
       
@@ -381,92 +399,97 @@ export default function TabOneScreen() {
     }
   };
 
-  // Fetch solar data from Supabase
+  // Function to fetch solar data and update states
   const fetchSolarData = async () => {
     try {
-      if (deviceSerials.length === 0) {
-        console.log("No device serials available");
+      if (!deviceSerials || deviceSerials.length === 0) {
+        console.log("No device serials available for fetching data");
         return;
       }
       
-      console.log("Fetching latest solar data...");
+      // Get the most recent solar data for each device
+      const { data: solarDataResults, error: solarError } = await supabase
+        .from('solar_data')
+        .select('*')
+        .in('inverter_sn', deviceSerials)
+        .order('timestamp', { ascending: false })
+        .limit(deviceSerials.length); // Get one entry per device
       
-      // Get the latest data for each device
-      const promises = deviceSerials.map(async (serial) => {
-        const { data, error } = await supabase
-          .from('solar_data')
-          .select('*')
-          .eq('inverter_sn', serial)
-          .order('timestamp', { ascending: false })
-          .limit(1);
-          
-        if (error) {
-          console.error(`Error fetching data for device ${serial}:`, error);
-          return null;
-        }
-        
-        return data && data.length > 0 ? data[0] : null;
-      });
-      
-      const results = await Promise.all(promises);
-      const validResults = results.filter(result => result !== null) as SolarData[];
-      
-      if (validResults.length === 0) {
-        console.log("No valid solar data found");
+      if (solarError) {
+        console.error("Error fetching solar data:", solarError);
         return;
       }
       
-      // Use the most recent data
-      const latestData = validResults.reduce((latest, current) => {
-        const latestDate = new Date(latest.timestamp);
-        const currentDate = new Date(current.timestamp);
-        return currentDate > latestDate ? current : latest;
-      });
+      // If no data is found for any device
+      if (!solarDataResults || solarDataResults.length === 0) {
+        console.log("No solar data found for devices");
+        setDataLoaded(true);
+        return;
+      }
       
-      console.log("Latest solar data:", latestData);
+      console.log(`Found solar data for ${solarDataResults.length} devices`);
       
-      // Convert values to correct units if needed (assuming values are in watts and need to be in kW)
-      const solarPower = latestData.solar_power / 1000; // Convert W to kW if needed
-      const loadPower = latestData.load_power / 1000; // Convert W to kW if needed
-      const batteryPower = latestData.battery_power / 1000; // Convert W to kW if needed
+      // For simplicity, we'll just use the first device's data
+      // In a real app, you might want to aggregate data from multiple devices
+      const latestData = solarDataResults[0] as SolarData;
       
-      // Update battery data
+      // Convert watt values to kilowatts
+      const solarPowerKW = latestData.solar_power / 1000;
+      const loadPowerKW = latestData.load_power / 1000;
+      const batteryPowerKW = latestData.battery_power / 1000;
+      
+      console.log(`Converting power values to kW - Solar: ${solarPowerKW}kW, Load: ${loadPowerKW}kW, Battery: ${batteryPowerKW}kW`);
+      
+      // Update battery state
+      // Correct battery charging logic: 
+      // negative battery_power means charging (battery is receiving power)
+      // positive battery_power means discharging (battery is providing power)
+      const isBatteryCharging = latestData.battery_power < 0;
+      console.log(`Battery state: ${isBatteryCharging ? 'Charging' : 'Discharging'}, Power: ${batteryPowerKW}kW`);
+      
       setBatteryData({
         level: latestData.battery_percentage,
-        isCharging: batteryPower < 0 // Negative battery power means charging
+        isCharging: isBatteryCharging
       });
       
-      // Update solar and load data current values (max is from daily function)
-      setSolarData(prevData => ({
-        ...prevData,
-        current: solarPower
+      // Use user settings for max power values if available
+      const maxSolarPower = userSettings.max_solar_power || DEFAULT_MAX_SOLAR_POWER;
+      const maxInverterPower = userSettings.max_inverter_power || DEFAULT_MAX_INVERTER_POWER;
+      
+      // Update solar power state
+      setSolarData(prevState => ({
+        current: solarPowerKW,
+        max: prevState.max, // This will be updated by fetchDailyMaxValues
+        capacity: maxSolarPower,
       }));
       
-      setLoadData(prevData => ({
-        ...prevData,
-        current: loadPower
+      // Update load power state
+      setLoadData(prevState => ({
+        current: loadPowerKW,
+        max: prevState.max, // This will be updated by fetchDailyMaxValues
+        capacity: maxInverterPower,
       }));
       
-      // Set last updated time
+      // Update last updated timestamp
       setLastUpdated(new Date());
       
-      // After getting the latest data, also fetch historical data
-      await fetchHistoricalData();
-      
-      // Fetch max values for today after getting current data
+      // Get the day's maximum values
       await fetchDailyMaxValues();
       
-      // Mark data as loaded
-      setDataLoaded(true);
+      // Get historical data for the graphs
+      await fetchHistoricalData();
       
+      // Set data loaded state to true
+      setDataLoaded(true);
     } catch (error) {
-      console.error("Error fetching solar data:", error);
-      // Still mark data as loaded even on error to allow UI to render
+      console.error("Error in fetchSolarData:", error);
       setDataLoaded(true);
     }
   };
 
+  // Main useEffect for initialization
   useEffect(() => {
+    // Check if user has devices and fetch initial data
     const checkUserDevices = async () => {
       try {
         // Get current user
@@ -479,6 +502,9 @@ export default function TabOneScreen() {
         }
 
         setUserId(user.id);
+        
+        // Fetch user settings
+        await fetchUserSettings(user.id);
         
         // Check if user has any devices
         const { data: devices, error: devicesError } = await supabase
@@ -511,6 +537,62 @@ export default function TabOneScreen() {
       } catch (error) {
         console.error("Unexpected error:", error);
         setLoading(false);
+      }
+    };
+
+    // Function to fetch user settings from database
+    const fetchUserSettings = async (userId: string) => {
+      try {
+        console.log('Fetching user settings...');
+        
+        // Get user settings from the users table
+        const { data: userData, error: userDataError } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', userId)
+          .single();
+        
+        if (userDataError) {
+          console.error("Error fetching user data:", userDataError);
+          return;
+        }
+        
+        console.log('User settings retrieved:', userData);
+        
+        // If we have user data with settings
+        if (userData) {
+          const settings: UserSettings = {};
+          
+          // Check if the user has the required settings fields and they are not null
+          if (userData.max_solar_power !== undefined && userData.max_solar_power !== null) {
+            console.log('Setting max solar power:', userData.max_solar_power);
+            settings.max_solar_power = userData.max_solar_power;
+          }
+          
+          if (userData.max_inverter_power !== undefined && userData.max_inverter_power !== null) {
+            console.log('Setting max inverter power:', userData.max_inverter_power);
+            settings.max_inverter_power = userData.max_inverter_power;
+          }
+          
+          if (userData.latitude && userData.longitude) {
+            console.log('Setting location:', userData.latitude, userData.longitude);
+            settings.latitude = userData.latitude;
+            settings.longitude = userData.longitude;
+            
+            // Update sunrise and sunset times with user's location
+            const sunTimes = estimateSunriseSunset(userData.latitude, new Date());
+            setDayTime(prevState => ({
+              ...prevState,
+              sunrise: sunTimes.sunrise,
+              sunset: sunTimes.sunset,
+            }));
+          }
+          
+          // Save settings to state
+          setUserSettings(settings);
+        }
+      } catch (error) {
+        console.error("Error in fetchUserSettings:", error);
       }
     };
 
@@ -560,7 +642,22 @@ export default function TabOneScreen() {
     // Request location and update sunrise/sunset times
     const updateLocation = async () => {
       try {
-        // First check if location services are enabled
+        // First check if we have location from user settings
+        if (userSettings.latitude && userSettings.longitude) {
+          console.log(`Using user settings location: ${userSettings.latitude}, ${userSettings.longitude}`);
+          
+          // Calculate sunrise and sunset based on user settings location
+          const sunTimes = estimateSunriseSunset(userSettings.latitude, new Date());
+          setDayTime(prevState => ({
+            ...prevState,
+            sunrise: sunTimes.sunrise,
+            sunset: sunTimes.sunset,
+          }));
+          
+          return;
+        }
+        
+        // If we don't have location in user settings, try to get current location
         const serviceEnabled = await Location.hasServicesEnabledAsync();
         
         if (!serviceEnabled) {
@@ -631,7 +728,7 @@ export default function TabOneScreen() {
     return () => {
       clearInterval(timeInterval);
     };
-  }, []);
+  }, [userSettings]);
   
   // Function to update current time
   const updateCurrentTime = () => {
@@ -1428,8 +1525,8 @@ export default function TabOneScreen() {
           yLabel="%"
           color={theme.primaryColor}
           domain={{ y: [0, 100] }}
-          lastValue={batteryData.isCharging ? -1 * historicalData.batteryCharging[historicalData.batteryCharging.length - 1]?.value || 0 : historicalData.batteryCharging[historicalData.batteryCharging.length - 1]?.value || 0}
-          lastValueLabel="Current Battery Power"
+          lastValue={Math.abs(historicalData.batteryCharging[historicalData.batteryCharging.length - 1]?.value || 0)}
+          lastValueLabel={batteryData.isCharging ? "Current Charging Power" : "Current Discharging Power"}
           lastValueUnit="kW"
         />
         
